@@ -1,0 +1,107 @@
+[
+  {
+    "service": "payments-service",
+    "error": "redis.exceptions.ConnectionError: Error 111 connecting to redis-cache-01:6379. Connection refused.",
+    "root_cause": "Redis instance hit max client connections (10000) because the payments-service connection pool was set to 'unbounded' and leaked connections under load spikes.",
+    "fix": "Set connection pool max_connections=50 in payments-service redis client config, and added a connection timeout of 2s. Restarted redis-cache-01 to clear stale connections.",
+    "resolution_minutes": 42
+  },
+  {
+    "service": "auth-service",
+    "error": "jwt.exceptions.ExpiredSignatureError intermittently thrown for ~15% of requests despite valid tokens.",
+    "root_cause": "Clock drift between auth-service pods (up to 90 seconds) due to missing NTP sync on newly provisioned nodes, causing premature JWT expiry checks.",
+    "fix": "Enabled chrony NTP sync in the base AMI and added a 60s leeway to jwt.decode() as a safety margin.",
+    "resolution_minutes": 65
+  },
+  {
+    "service": "checkout-api",
+    "error": "psycopg2.OperationalError: FATAL: remaining connection slots are reserved for non-replication superuser connections",
+    "root_cause": "A deploy left an old version of checkout-api running alongside the new one for 10 minutes, doubling active DB connections and exhausting Postgres max_connections (200).",
+    "fix": "Added pgbouncer as a connection pooler in front of Postgres, and set deploy strategy to fully drain old pods before starting new ones.",
+    "resolution_minutes": 38
+  },
+  {
+    "service": "notification-worker",
+    "error": "kafka.errors.CommitFailedError: Commit cannot be completed since the group has already rebalanced",
+    "root_cause": "Consumer processing time for large notification batches exceeded max.poll.interval.ms (300000ms), triggering repeated rebalances and duplicate message processing.",
+    "fix": "Reduced max.poll.records from 500 to 100 and increased max.poll.interval.ms to 600000. Added idempotency keys to prevent duplicate sends.",
+    "resolution_minutes": 51
+  },
+  {
+    "service": "search-service",
+    "error": "elasticsearch.exceptions.ConnectionTimeout: Connection timed out after 30000ms",
+    "root_cause": "Elasticsearch cluster went yellow after a node was OOM-killed during a bulk reindex job that wasn't rate-limited.",
+    "fix": "Throttled bulk reindex to 500 docs/batch with a 200ms delay, and set JVM heap to 50% of node memory per ES best practices.",
+    "resolution_minutes": 74
+  },
+  {
+    "service": "image-processing-service",
+    "error": "MemoryError: Unable to allocate 2.1 GiB for an array during thumbnail generation",
+    "root_cause": "A user uploaded a 180-megapixel image that wasn't validated against a max resolution limit, causing the resize worker to OOM.",
+    "fix": "Added input validation to reject images over 40MP before processing, and capped worker memory with a cgroup limit plus graceful error response.",
+    "resolution_minutes": 29
+  },
+  {
+    "service": "billing-service",
+    "error": "stripe.error.RateLimitError: Too many requests hit the API too quickly",
+    "root_cause": "A retry loop on failed webhook processing had no backoff, causing a thundering herd of retries against Stripe's API during a partial outage.",
+    "fix": "Implemented exponential backoff with jitter (base 1s, max 60s) on the webhook retry handler and added a circuit breaker.",
+    "resolution_minutes": 33
+  },
+  {
+    "service": "user-profile-service",
+    "error": "sqlalchemy.exc.OperationalError: (pymysql.err.OperationalError) (1205, 'Lock wait timeout exceeded')",
+    "root_cause": "A long-running analytics query against the primary MySQL instance held row locks on the users table, blocking profile update transactions.",
+    "fix": "Moved analytics queries to a read replica and added a statement_timeout of 5s on the primary for all non-critical queries.",
+    "resolution_minutes": 47
+  },
+  {
+    "service": "api-gateway",
+    "error": "upstream connect error or disconnect/reset before headers. reset reason: connection termination",
+    "root_cause": "A canary deploy of checkout-api had a missing health check endpoint, so the gateway routed traffic to pods that weren't ready yet.",
+    "fix": "Added a proper /healthz endpoint with dependency checks and configured the gateway to wait for 3 consecutive healthy checks before routing traffic.",
+    "resolution_minutes": 22
+  },
+  {
+    "service": "recommendation-engine",
+    "error": "TimeoutError: Model inference request exceeded 5000ms timeout",
+    "root_cause": "A batch retraining job was running on the same GPU node as the live inference service, starving it of compute during peak traffic.",
+    "fix": "Moved retraining jobs to a dedicated GPU node pool with taints/tolerations so they can never schedule alongside inference workloads.",
+    "resolution_minutes": 56
+  },
+  {
+    "service": "payments-service",
+    "error": "redis.exceptions.TimeoutError: Timeout reading from socket",
+    "root_cause": "Recurrence of redis connection issues, this time caused by a noisy-neighbor batch job on the same redis instance running large KEYS * scans.",
+    "fix": "Migrated the batch job to use SCAN with cursor pagination instead of KEYS, and moved payments-service to a dedicated redis instance.",
+    "resolution_minutes": 40
+  },
+  {
+    "service": "email-service",
+    "error": "smtplib.SMTPServerDisconnected: Connection unexpectedly closed",
+    "root_cause": "SendGrid rotated their SMTP relay IPs and the service's outbound firewall rule was pinned to old IPs instead of the hostname.",
+    "fix": "Switched from IP allowlisting to hostname-based egress rules, and added SMTP connection retry with a fresh DNS lookup each attempt.",
+    "resolution_minutes": 35
+  },
+  {
+    "service": "inventory-service",
+    "error": "django.db.utils.IntegrityError: duplicate key value violates unique constraint 'inventory_sku_key'",
+    "root_cause": "A race condition between two concurrent stock-sync jobs from different warehouses both trying to insert the same new SKU simultaneously.",
+    "fix": "Added an upsert (ON CONFLICT DO UPDATE) pattern instead of insert-then-check, eliminating the race condition entirely.",
+    "resolution_minutes": 31
+  },
+  {
+    "service": "auth-service",
+    "error": "429 Too Many Requests from internal rate limiter during login spike",
+    "root_cause": "A marketing email blast drove a 20x login spike within 2 minutes, exceeding the auth-service rate limiter's burst capacity.",
+    "fix": "Increased burst capacity with a token bucket algorithm (100 burst, 20/sec sustained) and added horizontal autoscaling triggered by request queue depth.",
+    "resolution_minutes": 44
+  },
+  {
+    "service": "checkout-api",
+    "error": "concurrent.futures._base.TimeoutError calling fraud-detection-service",
+    "root_cause": "fraud-detection-service's ML model was redeployed with a larger model that increased p99 latency from 200ms to 4s, but checkout-api's timeout was still set to 1s.",
+    "fix": "Added a circuit breaker with a fallback to a lightweight rule-based fraud check, and set up latency SLO alerts on dependency calls.",
+    "resolution_minutes": 68
+  }
+]
